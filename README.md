@@ -13,12 +13,11 @@
 
 ```
 .
-├── inference  # 推理阶段代码
-├── judge      # 评判阶段代码（支持 vllm 批量推理）
-├── wer        # 评估阶段代码
 ├── prompt.txt # 提示词模板
 ├── results/   # 中间/最终评估结果输出目录
-└── main.py    # 主入口脚本
+├── test.sh    # 批量评测自动化脚本
+├── test_set_demo.jsonl    # 示例测试集格式
+└── ASR-eval.py    # 主入口脚本
 ```
 
 ---
