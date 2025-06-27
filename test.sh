@@ -1,4 +1,0 @@
-# pip install jiwer
-python asr_test_new.py --model_path /mnt/general/xuchenye/speech/ms-swift/output/v13-20250625-173245/checkpoint-4602 --test_data /mnt/general/liziheng/Qwen-Audio/datasets/CommonVoice/zh_test_mini.jsonl --model_name v13 --is_Chinese > test_result/v13_commonVoice_zh.log 2>&1 
-python asr_test_new.py --model_path /mnt/general/xuchenye/speech/ms-swift/output/v13-20250625-173245/checkpoint-4602 --test_data /mnt/general/liziheng/Qwen-Audio/datasets/CommonVoice/en_test_mini.jsonl --model_name v13 > test_result/v41_commonVoice_en.log 2>&1
-python asr_test_new.py --model_path /mnt/general/xuchenye/speech/ms-swift/output/v13-20250625-173245/checkpoint-4602 --test_data /mnt/general/liziheng/Qwen-Audio/datasets/LibriSpeech/LibriSpeech_Test_mini.jsonl --model_name v13 > test_result/v41_librispeech.log 2>&1
