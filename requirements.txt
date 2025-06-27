@@ -1,0 +1,8 @@
+torch>=2.0.0
+transformers>=4.36.0
+vllm>=0.4.0
+soundfile
+jiwer
+pandas
+tqdm
+numpy
