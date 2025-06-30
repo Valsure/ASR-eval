@@ -12,6 +12,7 @@ from qwen_omni_utils import process_mm_info
 from vllm import LLM, SamplingParams
 import argparse
 import re
+import csv
 def normalize_text(text):
     text = text.lower()
     text = re.sub(r"[^\w\s]", "", text)
@@ -113,6 +114,7 @@ def inference_stage(model, processor, test_jsonl_path, is_chinese, inference_csv
 
             pd.DataFrame(results).to_csv(inference_csv_path, index=False, encoding="utf-8-sig")
 
+
 def judge_stage_vllm(prompt_path, inference_csv_path, judge_csv_path, model_path, batch_size):
     os.makedirs(os.path.dirname(judge_csv_path), exist_ok=True)
 
@@ -122,39 +124,74 @@ def judge_stage_vllm(prompt_path, inference_csv_path, judge_csv_path, model_path
     llm = LLM(model=model_path)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=256)
 
-    if os.path.exists(judge_csv_path):
-        df_existing = pd.read_csv(judge_csv_path)
-        already_judged_ids = set(df_existing["audio_id"].tolist())
-        fout = open(judge_csv_path, "a", encoding="utf-8-sig")
-    else:
-        fout = open(judge_csv_path, "w", encoding="utf-8-sig")
-        fout.write("audio_id,reference,raw_output,is_extract_success,extracted_content\n")
-        already_judged_ids = set()
+    already_judged_ids = set()
+    write_header = not os.path.exists(judge_csv_path)
 
-    df_infer = pd.read_csv(inference_csv_path)
+    with open(judge_csv_path, "a", encoding="utf-8-sig", newline='') as fout:
+        writer = csv.writer(fout)
 
-    batch_messages = []
-    batch_meta = []
+        if write_header:
+            writer.writerow(["audio_id", "reference", "raw_output", "is_extract_success", "extracted_content"])
+        else:
+            try:
+                df_existing = pd.read_csv(judge_csv_path)
+                already_judged_ids = set(df_existing["audio_id"].tolist())
+            except Exception as e:
+                print(f"[WARN] Failed to load existing judge CSV: {e}")
 
-    for idx, row in tqdm(df_infer.iterrows(), total=len(df_infer), desc="Preparing Judge Inputs"):
-        audio_id = row["audio_id"]
-        if audio_id in already_judged_ids:
-            continue
+        df_infer = pd.read_csv(inference_csv_path)
 
-        reference = row["reference"]
-        raw_output = row["raw_output"]
+        batch_messages = []
+        batch_meta = []
 
-        judge_input = {
-            "ground_truth": reference,
-            "transcripted": raw_output
-        }
-        prompt = prompt_template + "\n\n" + json.dumps(judge_input, ensure_ascii=False)
+        for idx, row in tqdm(df_infer.iterrows(), total=len(df_infer), desc="Preparing Judge Inputs"):
+            audio_id = row["audio_id"]
+            if audio_id in already_judged_ids:
+                continue
 
-        messages = [{"role": "user", "content": prompt}]
-        batch_messages.append(messages)
-        batch_meta.append((audio_id, reference, raw_output))
+            reference = row["reference"]
+            raw_output = row["raw_output"]
 
-        if len(batch_messages) == batch_size:
+            judge_input = {
+                "ground_truth": reference,
+                "transcripted": raw_output
+            }
+            prompt = prompt_template + "\n\n" + json.dumps(judge_input, ensure_ascii=False)
+
+            messages = [{"role": "user", "content": prompt}]
+            batch_messages.append(messages)
+            batch_meta.append((audio_id, reference, raw_output))
+
+            if len(batch_messages) == batch_size:
+                outputs = llm.chat(
+                    batch_messages,
+                    sampling_params=sampling_params,
+                    chat_template_kwargs={"enable_thinking": False}
+                )
+
+                for output, (audio_id, reference, raw_output) in zip(outputs, batch_meta):
+                    output_text = output.outputs[0].text.strip()
+                    try:
+                        result = extract_json_from_markdown(output_text)
+                        if result is not None:
+                            is_success = result.get("is_extraction_success", False)
+                            pred = result.get("extracted_content", "")
+                        else:
+                            is_success = False
+                            pred = raw_output
+                    except Exception as e:
+                        print(f"[Judge Parse Error] {audio_id}: {e}")
+                        is_success = False
+                        pred = raw_output
+
+                    writer.writerow([audio_id, reference, raw_output, is_success, pred])
+                    fout.flush()
+
+                batch_messages = []
+                batch_meta = []
+
+        # 处理剩余不足一批的样本
+        if batch_messages:
             outputs = llm.chat(
                 batch_messages,
                 sampling_params=sampling_params,
@@ -176,51 +213,9 @@ def judge_stage_vllm(prompt_path, inference_csv_path, judge_csv_path, model_path
                     is_success = False
                     pred = raw_output
 
-                fout.write(",".join([
-                    audio_id,
-                    json.dumps(reference, ensure_ascii=False),
-                    json.dumps(raw_output, ensure_ascii=False),
-                    str(is_success),
-                    json.dumps(pred, ensure_ascii=False)
-                ]) + "\n")
+                writer.writerow([audio_id, reference, raw_output, is_success, pred])
                 fout.flush()
 
-            batch_messages = []
-            batch_meta = []
-
-    # 处理剩余不足一批的样本
-    if batch_messages:
-        outputs = llm.chat(
-            batch_messages,
-            sampling_params=sampling_params,
-            chat_template_kwargs={"enable_thinking": False}
-        )
-
-        for output, (audio_id, reference, raw_output) in zip(outputs, batch_meta):
-            output_text = output.outputs[0].text.strip()
-            try:
-                result = extract_json_from_markdown(output_text)
-                if result is not None:
-                    is_success = result.get("is_extraction_success", False)
-                    pred = result.get("extracted_content", "")
-                else:
-                    is_success = False
-                    pred = raw_output
-            except Exception as e:
-                print(f"[Judge Parse Error] {audio_id}: {e}")
-                is_success = False
-                pred = raw_output
-
-            fout.write(",".join([
-                audio_id,
-                json.dumps(reference, ensure_ascii=False),
-                json.dumps(raw_output, ensure_ascii=False),
-                str(is_success),
-                json.dumps(pred, ensure_ascii=False)
-            ]) + "\n")
-            fout.flush()
-
-    fout.close()
 
 def wer_stage(judge_csv_path, is_chinese, wer_csv_path):
     os.makedirs(os.path.dirname(wer_csv_path), exist_ok=True)
