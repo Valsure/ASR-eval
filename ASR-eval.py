@@ -46,7 +46,7 @@ def inference_stage(model, processor, test_jsonl_path, is_chinese, inference_csv
     os.makedirs(os.path.dirname(inference_csv_path), exist_ok=True)
 
     if os.path.exists(inference_csv_path):
-        df_existing = pd.read_csv(inference_csv_path)
+        df_existing = pd.read_csv(inference_csv_path, sep="\t")
         already_processed_ids = set(df_existing["audio_id"].tolist())
         results = df_existing.to_dict("records")
     else:
@@ -112,7 +112,7 @@ def inference_stage(model, processor, test_jsonl_path, is_chinese, inference_csv
             })
 
 
-            pd.DataFrame(results).to_csv(inference_csv_path, index=False, encoding="utf-8-sig")
+            pd.DataFrame(results).to_csv(inference_csv_path, sep="\t", index=False, encoding="utf-8-sig")
 
 
 def judge_stage_vllm(prompt_path, inference_csv_path, judge_csv_path, model_path, batch_size):
@@ -128,18 +128,18 @@ def judge_stage_vllm(prompt_path, inference_csv_path, judge_csv_path, model_path
     write_header = not os.path.exists(judge_csv_path)
 
     with open(judge_csv_path, "a", encoding="utf-8-sig", newline='') as fout:
-        writer = csv.writer(fout)
+        writer = csv.writer(fout, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
 
         if write_header:
             writer.writerow(["audio_id", "reference", "raw_output", "is_extract_success", "extracted_content"])
         else:
             try:
-                df_existing = pd.read_csv(judge_csv_path)
+                df_existing = pd.read_csv(judge_csv_path, sep="\t")
                 already_judged_ids = set(df_existing["audio_id"].tolist())
             except Exception as e:
-                print(f"[WARN] Failed to load existing judge CSV: {e}")
+                print(f"Failed to load existing judge CSV: {e}")
 
-        df_infer = pd.read_csv(inference_csv_path)
+        df_infer = pd.read_csv(inference_csv_path, sep="\t")
 
         batch_messages = []
         batch_meta = []
@@ -217,53 +217,82 @@ def judge_stage_vllm(prompt_path, inference_csv_path, judge_csv_path, model_path
                 fout.flush()
 
 
+
 def wer_stage(judge_csv_path, is_chinese, wer_csv_path):
     os.makedirs(os.path.dirname(wer_csv_path), exist_ok=True)
 
-    df_judge = pd.read_csv(judge_csv_path)
+    df_judge = pd.read_csv(judge_csv_path, sep="\t")
     wer_list = []
     rows = []
+    bad_cases = []
 
     for idx, row in tqdm(df_judge.iterrows(), total=len(df_judge), desc="WER Stage"):
-        if not bool(row["is_extract_success"]):
+        audio_id = row["audio_id"]
+        reference = row["reference"]
+        prediction = row["extracted_content"]
+        is_success = bool(row["is_extract_success"])
+
+        if not is_success:
+            bad_cases.append({
+                "audio_id": audio_id,
+                "reference": reference,
+                "prediction": prediction,
+                "wer": None,
+                "reason": "extract_fail"
+            })
             continue
 
-        ref = normalize_text(row["reference"])
-        hyp = normalize_text(row["extracted_content"])
+        ref = normalize_text(reference)
+        hyp = normalize_text(prediction)
         w = compute_Chinese_wer(ref, hyp, is_chinese)
 
+        if w > 1.0:
+            bad_cases.append({
+                "audio_id": audio_id,
+                "reference": reference,
+                "prediction": prediction,
+                "wer": w,
+                "reason": "high_wer"
+            })
+            continue
+
         rows.append({
-            "audio_id": row["audio_id"],
-            "reference": row["reference"],
-            "prediction": row["extracted_content"],
+            "audio_id": audio_id,
+            "reference": reference,
+            "prediction": prediction,
             "wer": w
         })
         wer_list.append(w)
 
     df_out = pd.DataFrame(rows)
-    df_out.to_csv(wer_csv_path, index=False, encoding="utf-8-sig")
+    df_out.to_csv(wer_csv_path, sep="\t", index=False, encoding="utf-8-sig")
 
-    success_count = df_judge["is_extract_success"].sum()
-    failure_count = (~df_judge["is_extract_success"]).sum() 
-
-    WER_result_file = f"results/{args.model_name}_{base_name}_final_result.csv"
-    with open(WER_result_file, "w", encoding = 'utf-8') as result_file:
-        result_file.write(f"Total samples: {len(df_judge)}\n")
-        result_file.write(f"Successful extractions: {success_count}\n")
-        result_file.write(f"Failed extractions: {failure_count}\n")
-        if wer_list:
-            result_file.write(f"Average WER: {sum(wer_list)/len(wer_list):.4f}")
-        else:
-            result_file.write("No valid results to compute WER.")
-        print(f"结果已经保存到：{WER_result_file}")
-
-    bad_cases = df_judge[df_judge["is_extract_success"] == False]
-    if not bad_cases.empty:
+    if bad_cases:
         bad_case_csv = wer_csv_path.replace("_wer.csv", "_bad_case.csv")
-        bad_cases.to_csv(bad_case_csv, index=False, encoding="utf-8-sig")
+        df_bad = pd.DataFrame(bad_cases)
+        df_bad.to_csv(bad_case_csv, sep="\t", index=False, encoding="utf-8-sig")
         print(f"[Bad Cases] Saved {len(bad_cases)} bad cases to {bad_case_csv}")
     else:
         print("[Bad Cases] No bad cases found.")
+
+    success_count = sum(df_judge["is_extract_success"])
+    failure_count = len(df_judge) - success_count
+    final_wer = sum(wer_list) / len(wer_list) if wer_list else None
+
+    WER_result_file = f"results/{args.model_name}_{base_name}_final_result.csv"
+    with open(WER_result_file, "w", encoding='utf-8') as result_file:
+        result_file.write(f"Total samples: {len(df_judge)}\n")
+        result_file.write(f"Successful extractions: {success_count}\n")
+        result_file.write(f"Failed extractions: {failure_count}\n")
+        result_file.write(f"Valid WER samples: {len(wer_list)}\n")
+        result_file.write(f"Bad cases (fail + WER>1): {len(bad_cases)}\n")
+        if final_wer is not None:
+            result_file.write(f"Average WER: {final_wer:.4f}\n")
+        else:
+            result_file.write("No valid results to compute WER.\n")
+
+    print(f"结果已经保存到：{WER_result_file}")
+
 
 
 if __name__ == "__main__":
